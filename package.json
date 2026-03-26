@@ -1,0 +1,51 @@
+{
+  "name": "ai-sales-agent-simulator",
+  "version": "1.0.0",
+  "description": "AI sales agent that builds psychological digital twins of prospects and runs Monte Carlo simulations across hundreds of sales strategies to find the optimal outreach approach. Open-source sales simulator for cold emails and sales calls.",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "sales-sim": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "sim:email": "node src/index.js --mode email",
+    "sim:conversation": "node src/index.js --mode conversation",
+    "test": "node src/test.js"
+  },
+  "keywords": [
+    "ai-sales-agent",
+    "sales-simulator",
+    "ai-sales-tool",
+    "sales-strategy",
+    "digital-twin",
+    "cold-email-optimization",
+    "ai-prospecting",
+    "sales-automation",
+    "conversation-simulator",
+    "sales-call-simulator",
+    "monte-carlo-simulation",
+    "ai-outreach",
+    "sales-optimization",
+    "ai-sales-assistant",
+    "happycapy",
+    "sales-agent",
+    "ai-powered-sales",
+    "prospect-simulation",
+    "sales-enablement",
+    "personality-profiling"
+  ],
+  "author": "HappyCapy <hello@happycapy.ai> (https://happycapy.ai)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ndpvt-web/ai-sales-agent-simulator.git"
+  },
+  "homepage": "https://github.com/ndpvt-web/ai-sales-agent-simulator#readme",
+  "bugs": {
+    "url": "https://github.com/ndpvt-web/ai-sales-agent-simulator/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

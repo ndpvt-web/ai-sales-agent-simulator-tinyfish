@@ -1,0 +1,20 @@
+{
+  "name": "Alex Chen",
+  "title": "CTO",
+  "company": "TechVentures Inc",
+  "industry": "Enterprise SaaS",
+  "linkedinPosts": [
+    "Just shipped our new microservices architecture. 6 months of work, but the scalability gains are worth it.",
+    "Hot take: most AI products are solutions looking for problems. Start with the user pain point.",
+    "Proud of the team for hitting 99.99% uptime this quarter. Reliability is a feature.",
+    "Reading 'Thinking in Systems' by Donella Meadows. Every engineer should read this."
+  ],
+  "tweets": [
+    "The best technical decisions are the boring ones.",
+    "Hiring: looking for engineers who ask 'why' before 'how'."
+  ],
+  "companyInfo": [
+    "TechVentures raised Series B ($45M) in Q3 2025",
+    "Expanding enterprise sales team, targeting Fortune 500"
+  ]
+}
