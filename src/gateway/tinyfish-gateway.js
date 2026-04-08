@@ -28,61 +28,46 @@ function getApiKey() {
 }
 
 /**
- * Parse SSE stream from TinyFish Agent API.
- * Reads the response body as text, extracts SSE data events,
- * and returns the COMPLETE event's result.
+ * Consume SSE response from TinyFish Agent API.
+ * Reads the full response body as text, then parses SSE events.
+ * This is more reliable than streaming getReader() for SSE over HTTP/2.
  *
  * @param {Response} res - fetch Response with SSE body
- * @param {number} timeout - max wait time ms
- * @returns {Promise<{result: any, runId: string, steps: number}>}
+ * @returns {{result: any, runId: string, steps: number}}
  */
-async function parseSSEStream(res, timeout) {
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
+function parseSSEEvents(responseText) {
   let runId = '';
   let result = null;
   let progressCount = 0;
 
-  const deadline = Date.now() + timeout;
+  // SSE events are separated by double newlines; each line starts with "data: "
+  const lines = responseText.split('\n');
 
-  while (Date.now() < deadline) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('data:')) continue;
+    const jsonStr = trimmed.slice(5).trim();
+    if (!jsonStr) continue;
 
-    buffer += decoder.decode(value, { stream: true });
+    try {
+      const event = JSON.parse(jsonStr);
 
-    // Process complete lines
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || ''; // Keep incomplete last line in buffer
-
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const jsonStr = line.slice(6).trim();
-      if (!jsonStr) continue;
-
-      try {
-        const event = JSON.parse(jsonStr);
-
-        if (event.type === 'STARTED') {
-          runId = event.run_id || '';
-        } else if (event.type === 'PROGRESS') {
-          progressCount++;
-        } else if (event.type === 'COMPLETE') {
-          result = event.result;
-          runId = event.run_id || runId;
-          reader.cancel();
-          return { result, runId, steps: progressCount };
-        }
-      } catch {
-        // Skip malformed JSON lines
+      if (event.type === 'STARTED') {
+        runId = event.run_id || '';
+      } else if (event.type === 'PROGRESS') {
+        progressCount++;
+      } else if (event.type === 'COMPLETE') {
+        result = event.result;
+        runId = event.run_id || runId;
       }
+    } catch {
+      // Skip malformed JSON lines
     }
   }
 
-  // Timeout or stream ended without COMPLETE
-  reader.cancel();
-  if (result) return { result, runId, steps: progressCount };
+  if (result !== null && result !== undefined) {
+    return { result, runId, steps: progressCount };
+  }
   throw new Error('TinyFish SSE stream ended without COMPLETE event');
 }
 
@@ -129,16 +114,18 @@ export async function agentScrape(url, goal, options = {}) {
       throw new Error(`TinyFish Agent API error (${res.status}): ${errText}`);
     }
 
-    // Check if response is SSE stream or plain JSON
-    const contentType = res.headers.get('content-type') || '';
-    if (contentType.includes('text/event-stream')) {
-      const { result, runId, steps } = await parseSSEStream(res, timeout);
+    // Read the full response body as text (works for both SSE and JSON)
+    const responseText = await res.text();
+
+    // Check if it looks like SSE (starts with "data:")
+    if (responseText.trimStart().startsWith('data:') || responseText.includes('\ndata:')) {
+      const { result, runId, steps } = parseSSEEvents(responseText);
       stepCount += steps;
       return { data: result, steps, runId };
     }
 
     // Fallback: plain JSON response
-    const response = await res.json();
+    const response = JSON.parse(responseText);
     const steps = response.steps_taken || 0;
     stepCount += steps;
     return { data: response.data || response.result, steps, runId: response.run_id || '' };
