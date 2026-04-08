@@ -4,15 +4,14 @@
  * Axiom: All TinyFish API communication flows through a single abstraction.
  * No module calls TinyFish directly. This is the only HTTP boundary.
  *
- * Contract: Three endpoints — agentScrape, fetchPages, searchWeb.
- * Retry logic: exponential backoff on 429/502/503. Max 3 retries.
+ * Uses the SSE streaming endpoint (/run-sse) as the primary transport.
+ * Search and Fetch are routed through the Agent API as well, since
+ * free-tier keys only have access to the Agent SSE endpoint.
  */
 
-const AGENT_URL = 'https://agent.tinyfish.ai/v1/automation/run';
-const FETCH_URL = 'https://api.fetch.tinyfish.ai';
-const SEARCH_URL = 'https://api.search.tinyfish.ai';
+const AGENT_SSE_URL = 'https://agent.tinyfish.ai/v1/automation/run-sse';
 
-const DEFAULT_TIMEOUT = parseInt(process.env.TINYFISH_TIMEOUT || '60000', 10);
+const DEFAULT_TIMEOUT = parseInt(process.env.TINYFISH_TIMEOUT || '120000', 10);
 const DEFAULT_PROXY = process.env.TINYFISH_PROXY || 'US';
 
 /** @type {number} */
@@ -29,75 +28,67 @@ function getApiKey() {
 }
 
 /**
- * Sleep for a given number of milliseconds.
- * @param {number} ms
- * @returns {Promise<void>}
+ * Parse SSE stream from TinyFish Agent API.
+ * Reads the response body as text, extracts SSE data events,
+ * and returns the COMPLETE event's result.
+ *
+ * @param {Response} res - fetch Response with SSE body
+ * @param {number} timeout - max wait time ms
+ * @returns {Promise<{result: any, runId: string, steps: number}>}
  */
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+async function parseSSEStream(res, timeout) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let runId = '';
+  let result = null;
+  let progressCount = 0;
 
-/**
- * Make an HTTP request with retry logic on 429/502/503.
- * @param {string} url
- * @param {RequestInit} init
- * @param {number} [timeout]
- * @returns {Promise<Response>}
- */
-async function fetchWithRetry(url, init, timeout = DEFAULT_TIMEOUT) {
-  const NO_RETRY_CODES = new Set([400, 401, 404]);
-  const RETRY_CODES = new Set([429, 502, 503]);
-  const MAX_RETRIES = 3;
+  const deadline = Date.now() + timeout;
 
-  let lastErr;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
+  while (Date.now() < deadline) {
+    const { done, value } = await reader.read();
+    if (done) break;
 
-    try {
-      const res = await fetch(url, { ...init, signal: controller.signal });
-      clearTimeout(timer);
+    buffer += decoder.decode(value, { stream: true });
 
-      if (res.ok) return res;
+    // Process complete lines
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || ''; // Keep incomplete last line in buffer
 
-      if (NO_RETRY_CODES.has(res.status)) {
-        const errText = await res.text();
-        throw new Error(`TinyFish API error (${res.status}): ${errText}`);
-      }
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const jsonStr = line.slice(6).trim();
+      if (!jsonStr) continue;
 
-      if (RETRY_CODES.has(res.status) && attempt < MAX_RETRIES) {
-        const backoff = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
-        await sleep(backoff);
-        continue;
-      }
+      try {
+        const event = JSON.parse(jsonStr);
 
-      const errText = await res.text();
-      throw new Error(`TinyFish API error (${res.status}): ${errText}`);
-    } catch (err) {
-      clearTimeout(timer);
-      if (err.name === 'AbortError') {
-        throw new Error(`TinyFish request timed out after ${timeout}ms: ${url}`);
-      }
-      // Rethrow non-retry errors immediately
-      if (!(err.message && err.message.startsWith('TinyFish API error')) || NO_RETRY_CODES.has(parseInt(err.message.match(/\((\d+)\)/)?.[1] || '0'))) {
-        if (attempt >= MAX_RETRIES) throw err;
-        lastErr = err;
-        const backoff = Math.pow(2, attempt) * 1000;
-        await sleep(backoff);
-      } else {
-        throw err;
+        if (event.type === 'STARTED') {
+          runId = event.run_id || '';
+        } else if (event.type === 'PROGRESS') {
+          progressCount++;
+        } else if (event.type === 'COMPLETE') {
+          result = event.result;
+          runId = event.run_id || runId;
+          reader.cancel();
+          return { result, runId, steps: progressCount };
+        }
+      } catch {
+        // Skip malformed JSON lines
       }
     }
   }
-  throw lastErr || new Error('TinyFish request failed after retries');
+
+  // Timeout or stream ended without COMPLETE
+  reader.cancel();
+  if (result) return { result, runId, steps: progressCount };
+  throw new Error('TinyFish SSE stream ended without COMPLETE event');
 }
 
 /**
  * Scrape a URL using TinyFish Agent API with SSE streaming.
- * Endpoint: POST https://agent.tinyfish.ai/v1/automation/run
- * Uses synchronous /run endpoint (not SSE) for simplicity.
- * Headers: X-API-Key, Content-Type: application/json
- * Body: { url, goal, proxy_config?: { country_code } }
+ * Endpoint: POST https://agent.tinyfish.ai/v1/automation/run-sse
  *
  * @param {string} url - Target URL to scrape
  * @param {string} goal - Natural language extraction goal
@@ -117,70 +108,91 @@ export async function agentScrape(url, goal, options = {}) {
     proxy_config: { country_code: DEFAULT_PROXY },
   };
 
-  const res = await fetchWithRetry(
-    AGENT_URL,
-    {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const res = await fetch(AGENT_SSE_URL, {
       method: 'POST',
       headers: {
         'X-API-Key': apiKey,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
-    },
-    timeout,
-  );
+      signal: controller.signal,
+    });
 
-  const response = await res.json();
-  const steps = response.steps_taken || 0;
-  stepCount += steps;
+    clearTimeout(timer);
 
-  return {
-    data: response.data,
-    steps,
-    runId: response.run_id || '',
-  };
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`TinyFish Agent API error (${res.status}): ${errText}`);
+    }
+
+    // Check if response is SSE stream or plain JSON
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('text/event-stream')) {
+      const { result, runId, steps } = await parseSSEStream(res, timeout);
+      stepCount += steps;
+      return { data: result, steps, runId };
+    }
+
+    // Fallback: plain JSON response
+    const response = await res.json();
+    const steps = response.steps_taken || 0;
+    stepCount += steps;
+    return { data: response.data || response.result, steps, runId: response.run_id || '' };
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === 'AbortError') {
+      throw new Error(`TinyFish request timed out after ${timeout}ms: ${url}`);
+    }
+    throw err;
+  }
 }
 
 /**
- * Fetch and extract content from URLs using TinyFish Fetch API.
- * Endpoint: POST https://api.fetch.tinyfish.ai
- * Headers: X-API-Key, Content-Type: application/json
- * Body: { urls: string[], format: 'markdown'|'html'|'json', proxy_config? }
- * Response: { results: [{ url, title, text, description }], errors: [] }
+ * Fetch and extract content from URLs using TinyFish Agent API.
+ * Routes through the Agent SSE endpoint since Fetch API may not
+ * be available on all API key tiers.
  *
  * @param {string[]} urls - Up to 10 URLs to fetch
- * @param {string} [format='markdown'] - Output format
+ * @param {string} [format='markdown'] - Output format (used in goal)
  * @returns {Promise<Array<{url: string, title: string, text: string, description: string}>>}
  */
 export async function fetchPages(urls, format = 'markdown') {
   console.log(`[TinyFish] Fetching ${urls.length} page(s): ${urls[0]}${urls.length > 1 ? ` +${urls.length - 1} more` : ''}`);
 
-  const apiKey = getApiKey();
+  const results = [];
 
-  const body = {
-    urls,
-    format,
-    proxy_config: { country_code: DEFAULT_PROXY },
-  };
+  for (const url of urls) {
+    try {
+      const { data } = await agentScrape(
+        url,
+        `Extract the main content of this page as ${format}. Return JSON: { title: string, text: string (the main content as ${format}), description: string (a one-sentence summary) }`,
+        { timeout: 90000 },
+      );
 
-  const res = await fetchWithRetry(FETCH_URL, {
-    method: 'POST',
-    headers: {
-      'X-API-Key': apiKey,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
+      const parsed = typeof data === 'string' ? JSON.parse(data) : (data || {});
+      results.push({
+        url,
+        title: parsed.title || '',
+        text: parsed.text || parsed.content || JSON.stringify(parsed),
+        description: parsed.description || '',
+      });
+    } catch (err) {
+      console.warn(`[TinyFish] Failed to fetch ${url}: ${err.message}`);
+      results.push({ url, title: '', text: '', description: '' });
+    }
+  }
 
-  const response = await res.json();
-  return response.results || [];
+  return results;
 }
 
 /**
- * Search the web using TinyFish Search API.
- * Endpoint: GET https://api.search.tinyfish.ai
- * Query params: q, count, X-API-Key header
- * Response: { results: [{ title, url, snippet }] }
+ * Search the web using TinyFish Agent API.
+ * Routes through Agent API using Google as the search engine,
+ * since the Search API may not be available on all key tiers.
  *
  * @param {string} query - Search query
  * @param {number} [count=10] - Number of results
@@ -189,24 +201,30 @@ export async function fetchPages(urls, format = 'markdown') {
 export async function searchWeb(query, count = 10) {
   console.log(`[TinyFish] Searching: ${query}`);
 
-  const apiKey = getApiKey();
+  try {
+    const { data } = await agentScrape(
+      `https://www.google.com/search?q=${encodeURIComponent(query)}`,
+      `Extract the top ${count} search results from this Google search page. For each result, get the title, URL, and snippet text. Return as JSON array: [{ title: string, url: string, snippet: string }]. Only include actual search results, not ads or "People also ask" sections.`,
+      { timeout: 90000 },
+    );
 
-  const params = new URLSearchParams({ q: query, count: String(count) });
-  const url = `${SEARCH_URL}?${params}`;
-
-  const res = await fetchWithRetry(url, {
-    method: 'GET',
-    headers: {
-      'X-API-Key': apiKey,
-    },
-  });
-
-  const response = await res.json();
-  return response.results || [];
+    if (Array.isArray(data)) return data.slice(0, count);
+    if (data && Array.isArray(data.results)) return data.results.slice(0, count);
+    if (data && typeof data === 'object') {
+      // Try to find an array in the response
+      for (const key of Object.keys(data)) {
+        if (Array.isArray(data[key])) return data[key].slice(0, count);
+      }
+    }
+    return [];
+  } catch (err) {
+    console.warn(`[TinyFish] Search failed for "${query}": ${err.message}`);
+    return [];
+  }
 }
 
 /**
- * Get the total number of agent steps taken across all agentScrape calls.
+ * Get the total number of agent steps taken across all calls.
  * @returns {number}
  */
 export function getStepCount() {
