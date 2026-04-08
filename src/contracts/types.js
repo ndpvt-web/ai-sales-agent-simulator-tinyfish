@@ -8,6 +8,42 @@
  */
 
 // ============================================================
+// LAYER 0: Scraper Contracts (external data -> RawClientData)
+// ============================================================
+
+/** @typedef {'linkedin' | 'twitter' | 'website' | 'search' | 'blog' | 'news'} SourceType */
+
+/**
+ * @typedef {Object} ScrapeRequest
+ * @property {string} name - Full name of target
+ * @property {string} [company] - Company name
+ * @property {string} [title] - Job title
+ * @property {string} [industry] - Industry sector
+ * @property {string} [linkedinUrl] - Direct LinkedIn profile URL
+ * @property {string} [twitterHandle] - Twitter/X handle (no @)
+ * @property {string} [websiteUrl] - Personal or company website
+ * @property {string[]} [additionalUrls] - Other public URLs to scrape
+ */
+
+/**
+ * @typedef {Object} ScrapedSource
+ * @property {SourceType} type - Where this data came from
+ * @property {string} url - The URL that was scraped
+ * @property {string[]} items - Extracted text items
+ * @property {Object} [metadata] - Source-specific structured data
+ * @property {number} scrapedAt - Unix timestamp ms
+ */
+
+/**
+ * @typedef {Object} ScrapedData
+ * @property {ScrapeRequest} request - Original request
+ * @property {ScrapedSource[]} sources - All scraped sources
+ * @property {import('./types.js').RawClientData} assembled - Final assembled RawClientData
+ * @property {number} totalSources - Count of successful sources
+ * @property {number} scrapedAt - Completion timestamp
+ */
+
+// ============================================================
 // LAYER 1: Primitives (irreducible atoms)
 // ============================================================
 
