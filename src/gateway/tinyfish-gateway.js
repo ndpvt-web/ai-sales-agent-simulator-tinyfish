@@ -105,7 +105,7 @@ export async function agentScrape(url, goal, options = {}) {
   const body = {
     url,
     goal,
-    proxy_config: { country_code: DEFAULT_PROXY },
+    proxy_config: { enabled: true, country_code: DEFAULT_PROXY },
   };
 
   const controller = new AbortController();
